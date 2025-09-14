@@ -1,0 +1,36 @@
+[project]
+name = "smarthub"
+version = "0.1.0"
+description = "SmartHub (LLM → Home Assistant)"
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlmodel",
+    "sqlalchemy",
+    "pydantic",
+    "jsonschema",
+    "httpx",
+    "structlog",
+    "faiss-cpu",
+    "python-dotenv",
+    "pytest>=8.4.2",
+    "lancedb>=0.25.0",
+    "pyarrow>=21.0.0",
+]
+
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "integration: marks tests that hit real Home Assistant (requires HA_URL and HA_TOKEN)"
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
