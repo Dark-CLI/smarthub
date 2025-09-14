@@ -1,4 +1,4 @@
 .env
-*/__pycache__
-*/lancedb/
+**/__pycache__/
+**/lancedb/
 

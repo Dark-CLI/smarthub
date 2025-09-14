@@ -1,56 +1,70 @@
-from ha.client import HAClient
+# smarthub/ha/syncer.py
+from __future__ import annotations
+
+from typing import Dict, Any, List
 from data.repo import Repo
-from data.builders import static_snapshot_from_state, embed_text_from_static, dict_hash
+from data.builders import embed_text_from_static
 from data.embedding import embed_texts
-from data.vectors import add_or_update
+from data.vectors import add_or_update, add_or_update_batch
 
 
-async def sync_once(embed_model: str, embed_version: str) -> dict:
-    ha = HAClient()
+async def sync_embeddings(embed_model: str = "nomic-embed-text",
+                          embed_version: str = "v1",
+                          batch: int = 32) -> Dict[str, int]:
+    """
+    Hydrate Repo from HA (once), build embed texts, embed via Ollama, upsert into LanceDB.
+    Idempotent & safe to call repeatedly (we just overwrite vectors by key).
+    """
     repo = Repo()
+    await repo.ensure_hydrated()
 
-    states = await ha.states()          # list of entity states
-    services_list = await ha.services() # list of {domain, services}
-    # Build a domain->services dict for quick lookup
-    svc_by_domain = {b["domain"]: b.get("services", {}) for b in services_list if isinstance(b, dict)}
+    # ---- Entities: build texts
+    ent_keys: List[str] = []
+    ent_texts: List[str] = []
+    for eid, static_json in repo.iter_entities():
+        ent_keys.append(eid)
+        ent_texts.append(embed_text_from_static(static_json))
 
-    # 1) upsert entities (static-only)
-    changed_entities = []
-    for st in states:
-        dom = st["entity_id"].split(".", 1)[0]
-        static_json = static_snapshot_from_state(st, {dom: svc_by_domain.get(dom, {})})
-        content_hash = dict_hash(static_json)
-        if repo.upsert_entity(static_json, content_hash):  # returns True if new/changed
-            changed_entities.append(st["entity_id"])
+    # ---- Domains: build texts
+    dom_keys: List[str] = []
+    dom_texts: List[str] = []
+    for dom in repo.iter_domains():
+        dom_keys.append(dom)
+        dom_texts.append(repo.domain_embed_text(dom))
 
-    # 2) upsert domain services (one row per domain)
-    changed_domains = []
-    for dom, svcs in svc_by_domain.items():
-        srv_json = {"domain": dom, "services": svcs}
-        h = dict_hash(srv_json)
-        if repo.upsert_domain_services(dom, srv_json, h):
-            changed_domains.append(dom)
+    # ---- Embed (batched) + upsert vectors
+    entities_embedded = 0
+    domains_embedded = 0
 
-    # 3) embed what’s needed (new/changed or model bumped)
-    need_ent = repo.entities_needing_embedding(embed_model, embed_version)
-    texts_ent = [embed_text_from_static(repo.get_entity_static(eid)) for eid in need_ent]
-    if texts_ent:
-        vecs = await embed_texts(texts_ent, model=embed_model)
-        for eid, txt, vec in zip(need_ent, texts_ent, vecs):
-            vid = add_or_update(key=("entity", eid), vector=vec)
-            repo.save_entity_embedding(eid, vid, txt, embed_model, embed_version)
+    # entities
+    for i in range(0, len(ent_texts), batch):
+        chunk = ent_texts[i : i + batch]
+        vecs = await embed_texts(chunk, model=embed_model)
+        pairs = [(("entity", ent_keys[i + j]), vecs[j]) for j in range(len(vecs))]
+        add_or_update_batch(pairs)
+        for j in range(len(vecs)):
+            repo.mark_entity_embedded(ent_keys[i + j], embed_model, embed_version)
+        entities_embedded += len(vecs)
 
-    need_dom = repo.services_needing_embedding(embed_model, embed_version)
-    texts_dom = [f"domain: {d}\n" + repo.domain_embed_text(d) for d in need_dom]
-    if texts_dom:
-        vecs = await embed_texts(texts_dom, model=embed_model)
-        for dom, txt, vec in zip(need_dom, texts_dom, vecs):
-            vid = add_or_update(key=("domain", dom), vector=vec)
-            repo.save_domain_embedding(dom, vid, txt, embed_model, embed_version)
+    # domains
+    for i in range(0, len(dom_texts), batch):
+        chunk = dom_texts[i : i + batch]
+        vecs = await embed_texts(chunk, model=embed_model)
+        pairs = [(("domain", dom_keys[i + j]), vecs[j]) for j in range(len(vecs))]
+        add_or_update_batch(pairs)
+        for j in range(len(vecs)):
+            repo.mark_domain_embedded(dom_keys[i + j], embed_model, embed_version)
+        domains_embedded += len(vecs)
 
     return {
-        "entities_changed": len(changed_entities),
-        "domains_changed": len(changed_domains),
-        "entities_embedded": len(need_ent),
-        "domains_embedded": len(need_dom),
+        "entities_embedded": entities_embedded,
+        "domains_embedded": domains_embedded,
     }
+
+
+# Backwards-compatible helper (if you already call sync_once elsewhere)
+async def sync_once(embed_model: str = "nomic-embed-text", embed_version: str = "v1") -> Dict[str, int]:
+    """
+    Kept for compatibility with your scripts. Just delegates to sync_embeddings.
+    """
+    return await sync_embeddings(embed_model=embed_model, embed_version=embed_version)

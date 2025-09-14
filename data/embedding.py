@@ -4,7 +4,6 @@ from typing import List
 
 OLLAMA_URL = "http://localhost:11434/api/embeddings"
 
-
 async def embed_texts(texts: List[str], model: str = "nomic-embed-text") -> List[List[float]]:
     """
     Call Ollama embedding API.
