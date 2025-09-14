@@ -19,6 +19,7 @@ dependencies = [
     "pytest>=8.4.2",
     "lancedb>=0.25.0",
     "pyarrow>=21.0.0",
+    "pandas>=2.3.2",
 ]
 
 [tool.uv]
