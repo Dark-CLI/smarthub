@@ -1,9 +1,19 @@
+# smarthub/scripts/testsync.py
 import asyncio
-from ha.syncer import sync_once
+import time
+from ha.syncer import sync_embeddings
 
 async def main():
-    res = await sync_once(embed_model="nomic-embed-text", embed_version="v1")
-    print(res)
+    t0 = time.perf_counter()
+    r1 = await sync_embeddings(embed_model="nomic-embed-text", batch=32)
+    t1 = time.perf_counter()
+    print(f"[first]  {r1}  |  {(t1 - t0)*1000:.1f} ms")
+
+    # run immediately again; should embed 0 if hashes persisted
+    t2 = time.perf_counter()
+    r2 = await sync_embeddings(embed_model="nomic-embed-text", batch=32)
+    t3 = time.perf_counter()
+    print(f"[second] {r2}  |  {(t3 - t2)*1000:.1f} ms")
 
 if __name__ == "__main__":
     asyncio.run(main())

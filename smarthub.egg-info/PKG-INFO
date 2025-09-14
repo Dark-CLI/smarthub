@@ -1,0 +1,41 @@
+Metadata-Version: 2.4
+Name: smarthub
+Version: 0.1.0
+Summary: SmartHub (LLM → Home Assistant)
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi
+Requires-Dist: uvicorn[standard]
+Requires-Dist: sqlmodel
+Requires-Dist: sqlalchemy
+Requires-Dist: pydantic
+Requires-Dist: jsonschema
+Requires-Dist: httpx
+Requires-Dist: structlog
+Requires-Dist: faiss-cpu
+Requires-Dist: python-dotenv
+Requires-Dist: pytest>=8.4.2
+Requires-Dist: lancedb>=0.25.0
+Requires-Dist: pyarrow>=21.0.0
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-asyncio; extra == "dev"
+Requires-Dist: pytest-mock; extra == "dev"
+
+# SmartHub (LLM → Home Assistant)
+
+Pipeline (no arbiter):
+1) HA → server: `{chat_id, user_last_message, context}`
+2) Persist history + load summary
+3) Small LLM → intent (JSON) OR plain reply
+4) Resolver (code): map targets→device_ids, intent→action_id, normalize+validate args, build Candidate Bundle (+ examples)
+5) Large LLM → **Decide & Reply**:
+   - EXECUTE_AND_REPLY  (has device_id, action_id, args, reply_text)
+   - FETCH_MORE (server fetch; then call Decide & Reply again)
+   - REPLY (plain text)
+6) Execute via HA if needed; return reply
+7) Update summary/aliases
+
+Run:
+- `pip install -r requirements.txt`
+- `uvicorn app.main:app --reload`
