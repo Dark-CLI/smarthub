@@ -9,7 +9,7 @@ from ha.client import HAClient
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("q", nargs="*", help="query text, e.g.: turn on living room lamp")
+    ap.add_argument("q", nargs="*",)
     ap.add_argument("--k", type=int, default=5, help="top-k")
     args = ap.parse_args()
 

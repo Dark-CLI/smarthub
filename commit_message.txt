@@ -1,6 +1,0 @@
-feat(intent): Rework intent extraction and add test script
-
-- Reworks the `intent_extractor` with a more robust prompt and simplified logic.
-- The `extract_intents` function now returns the raw output from the LLM.
-- Adds a new `testintent.py` script to evaluate intent extraction performance.
-- Adds the `pandas` dependency for the test script.
