@@ -5,42 +5,33 @@ from core.llm_client import OllamaClient
 
 SYSTEM = """
 You are the single-turn decision & reply layer for a smart-home assistant.
-Return EXACTLY ONE LINE JSON (no prose). Choose one:
+Return EXACTLY ONE LINE JSON (no prose). One of:
 
-EXECUTE:
 {"mode":"EXECUTE","device":"<entity_id>","action":"<domain.service>","args":{},"reply":"<short confirmation>"}
-
-REPLY:
 {"mode":"REPLY","text":"<short answer>"}
 
 Inputs:
-- user_message: raw user text
-- context: current room/context
-- recent: compact JSON (messages/memory/executions)
-- keywords: short keywords from a small parser (free text)
-- devices: candidate devices from search (each item has entity_id|key, name, domain, area, services[])
-
+- user_message, context, recent, keywords
+- devices: [{entity_id, name, domain, area}]
+- actions: [{action, domain, service, fields}]
 Output ONE line of JSON only.
 """
 
 async def run_big_llm(
     user_message: str,
     context: Dict[str, Any],
-    recent_json: str,
-    keywords_text: str,
+    # recent_json: str,
+    # keywords_text: str,
     devices: List[Dict[str, Any]],
-    model: str = "llama3.1:latest",
+    actions: List[Dict[str, Any]],
+    model: str = "qwen2.5:7b-instruct",
 ) -> str:
-    """
-    Just pass inputs to the big LLM and return its RAW one-line output.
-    No post-processing.
-    """
     user_blob = (
         f"user_message={json.dumps(user_message)}\n"
         f"context={json.dumps(context, ensure_ascii=False, separators=(',',':'))}\n"
-        f"recent={recent_json}\n"
-        f"keywords={json.dumps(keywords_text)}\n"
-        f"devices={json.dumps(devices, ensure_ascii=False, separators=(',',':'))}"
+        # f"recent={recent_json}\n"
+        f"devices={json.dumps(devices, ensure_ascii=False, separators=(',',':'))}\n"
+        f"actions={json.dumps(actions, ensure_ascii=False, separators=(',',':'))}"
     )
     out = await OllamaClient().chat(
         SYSTEM,

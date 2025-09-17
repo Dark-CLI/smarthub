@@ -1,34 +1,46 @@
-# data/search_interface.py
-from typing import Any, Dict, List, Tuple
+# data/search.py
+from __future__ import annotations
+import time
+from typing import Any, Dict, List, Tuple, Optional
+
 from data.embedding import embed_texts
-from data.vectors import query as vector_query
 from ha.client import HAClient
 
-async def search_devices(text: str, top_k: int = 12, embed_model: str = "nomic-embed-text") -> List[Dict[str, Any]]:
-    """
-    Text → embed → vector search → resolve with HA.
-    Returns a list of dicts ready for Big LLM:
-      { "key": str, "entity_id": Optional[str], "name": str,
-        "domain": Optional[str], "area": Optional[str], "services": List[str] }
-    """
-    # 1) embed
-    qvec = (await embed_texts([text], model=embed_model))[0]
+# Import device/actions query funcs
+from data.vectors_devices import query as _query_devices  # (qvec, top_k) -> List[Tuple[key, score]]
+try:
+    from data.vectors_actions import query as _query_actions  # (qvec, top_k) -> List[Tuple[key, score]]
+except Exception:
+    _query_actions = None  # actions index not present yet → return []
 
-    # 2) vector search ([(key, score), ...])
-    hits: List[Tuple[str, float]] = vector_query(qvec, top_k=top_k) or []
+# tiny cache for HA services to avoid hammering
+_SVC_CACHE: Dict[str, Any] = {}
+_SVC_CACHE_AT = 0.0
+_SVC_TTL = 30.0
 
-    # 3) resolve via live HA
-    ha = HAClient()
+async def _services_map(ha: HAClient) -> Dict[str, Dict[str, Any]]:
+    global _SVC_CACHE_AT
+    now = time.time()
+    if _SVC_CACHE and (now - _SVC_CACHE_AT) < _SVC_TTL:
+        return _SVC_CACHE
+    m = await ha.services_map()
+    _SVC_CACHE.clear()
+    _SVC_CACHE.update(m or {})
+    _SVC_CACHE_AT = now
+    return _SVC_CACHE
+
+async def _resolve_devices(ha: HAClient, hits: List[Tuple[str, float]]) -> List[Dict[str, Any]]:
+    """[(key, score)] -> [{key, entity_id?, name, domain, area?, services[]}] (no scores in output)"""
     states = await ha.states()
     state_map = {s["entity_id"]: s for s in states}
-    svc_map = await ha.services_map()  # {"light": {"turn_on": {...}, ...}, ...}
+    svc_map = await _services_map(ha)
 
-    devices: List[Dict[str, Any]] = []
-    for key, _score in hits:
+    out: List[Dict[str, Any]] = []
+    for key, _ in hits:
         try:
             kind, ident = key.split(":", 1)
         except ValueError:
-            devices.append({"key": key, "entity_id": None, "name": key, "domain": None, "area": None, "services": []})
+            out.append({"key": key, "entity_id": None, "name": key, "domain": None, "area": None, "services": []})
             continue
 
         if kind == "entity":
@@ -36,14 +48,13 @@ async def search_devices(text: str, top_k: int = 12, embed_model: str = "nomic-e
             domain = entity_id.split(".", 1)[0] if "." in entity_id else None
             st = state_map.get(entity_id) or {}
             attrs = (st.get("attributes") or {})
-            name = attrs.get("friendly_name") or entity_id
-            # HA states don’t usually include area; leave None unless you have a resolver
-            area = attrs.get("area") or None
+            friendly = attrs.get("friendly_name") or entity_id
+            area = None  # TODO: wire HA area registry if you want real areas
             services = list((svc_map.get(domain) or {}).keys()) if domain else []
-            devices.append({
+            out.append({
                 "key": key,
                 "entity_id": entity_id,
-                "name": name,
+                "name": friendly,
                 "domain": domain,
                 "area": area,
                 "services": services,
@@ -51,7 +62,7 @@ async def search_devices(text: str, top_k: int = 12, embed_model: str = "nomic-e
         elif kind == "domain":
             domain = ident
             services = list((svc_map.get(domain) or {}).keys())
-            devices.append({
+            out.append({
                 "key": key,
                 "entity_id": None,
                 "name": domain,
@@ -60,6 +71,78 @@ async def search_devices(text: str, top_k: int = 12, embed_model: str = "nomic-e
                 "services": services,
             })
         else:
-            devices.append({"key": key, "entity_id": None, "name": key, "domain": None, "area": None, "services": []})
+            out.append({"key": key, "entity_id": None, "name": key, "domain": None, "area": None, "services": []})
+    return out
 
-    return devices
+async def _resolve_actions(ha: HAClient, hits: List[Tuple[str, float]]) -> List[Dict[str, Any]]:
+    """[(key, score)] -> [{key, action, domain, service, args_schema?}]"""
+    if not hits:
+        return []
+    svc_map = await _services_map(ha)
+
+    out: List[Dict[str, Any]] = []
+    for key, _ in hits:
+        # Expected shapes:
+        # - "service:light.turn_on"
+        # - or your actions table may already store fields; if so, keep it minimal
+        action = None
+        domain = None
+        service = None
+        try:
+            kind, ident = key.split(":", 1)
+            if kind == "service" and "." in ident:
+                domain, service = ident.split(".", 1)
+                action = ident
+        except ValueError:
+            pass
+
+        if not action and "." in key:
+            # fallback: parse raw key if it contains a dot
+            action = key.split(":", 1)[-1]
+
+        if not action:
+            out.append({"key": key, "action": None, "domain": None, "service": None})
+            continue
+
+        if not domain or not service:
+            if "." in action:
+                domain, service = action.split(".", 1)
+        schema = (svc_map.get(domain) or {}).get(service) if (domain and service) else None
+        out.append({
+            "key": key,
+            "action": action,
+            "domain": domain,
+            "service": service,
+            "args_schema": schema or None,  # pass through if you want; big LLM can ignore
+        })
+    return out
+
+class Searcher:
+    """
+    One-shot searcher:
+      - embed text ONCE
+      - query device index AND action index
+      - resolve to ready JSON lists for Big LLM
+    """
+
+    def __init__(self, top_k_devices: int = 6, top_k_actions: int = 6, embed_model: str = "nomic-embed-text"):
+        self.top_k_devices = top_k_devices
+        self.top_k_actions = top_k_actions
+        self.embed_model = embed_model
+
+    async def search(self, text: str) -> Dict[str, Any]:
+        # 1) embed once
+        qvec = (await embed_texts([text], model=self.embed_model))[0]
+
+        # 2) vector queries
+        dev_hits: List[Tuple[str, float]] = _query_devices(qvec, top_k=self.top_k_devices) or []
+        act_hits: List[Tuple[str, float]] = []
+        if _query_actions is not None:
+            act_hits = _query_actions(qvec, top_k=self.top_k_actions) or []
+
+        # 3) resolve
+        ha = HAClient()
+        devices = await _resolve_devices(ha, dev_hits)
+        actions = await _resolve_actions(ha, act_hits)
+
+        return {"devices": devices, "actions": actions}

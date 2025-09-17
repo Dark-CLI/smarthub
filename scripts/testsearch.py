@@ -1,51 +1,60 @@
 # smarthub/scripts/testsearch.py
 import asyncio
-import argparse
+import json
 import time
 
-from data.embedding import embed_texts
-from data.vectors import query
+from core.intent_extractor import extract_intents
+from data.search_devices import search_devices
 from ha.client import HAClient
 
+def _pp(obj):
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
 async def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("q", nargs="*",)
-    ap.add_argument("--k", type=int, default=5, help="top-k")
-    args = ap.parse_args()
+    # Hardcoded example input (change as needed)
+    message = "it's getting hot in her"
+    context = {"room": "kitchen"}
+    top_k = 4
 
-    qtext = " ".join(args.q) or "turn on living room lamp"
-    print(f"Query: {qtext}")
+    print(f"Message: {message}")
+    print(f"Context: {_pp(context)}")
 
-    # time embedding
+    # 1) small LLM → intent keywords
     t0 = time.perf_counter()
-    qvec = (await embed_texts([qtext], model="nomic-embed-text"))[0]
+    intent = await extract_intents(message, context)
     t1 = time.perf_counter()
+    print(f"Small LLM text: {intent}  ({(t1 - t0)*1000:.1f} ms)")
 
-    # time vector search
+    search_text = intent or message
+
+    # 2) search devices
     t2 = time.perf_counter()
-    hits = query(qvec, top_k=args.k)
+    devices = await search_devices(search_text, top_k=top_k)
     t3 = time.perf_counter()
 
-    # resolve friendly names using HA live state
+    # 3) for each unique domain in device results, get services using our HA API
     ha = HAClient()
-    states = await ha.states()
-    state_map = {s["entity_id"]: s for s in states}
 
-    print("Top matches:")
-    for key, score in hits:
-        kind, ident = key.split(":", 1)
-        if kind == "entity":
-            st = state_map.get(ident)
-            name = (st or {}).get("attributes", {}).get("friendly_name") or ident
-            print(f"  {score:.3f}  {ident}  →  {name}")
-        else:
-            # domain-level rows would look like "domain:light"
-            print(f"  {score:.3f}  {ident}  (domain)")
+    domains = sorted({
+        key.split(".", 1)[0] for key, state in devices if isinstance(key, str) and "." in key
+    })
 
-    print("\n--- Timings ---")
-    print(f"Embed query:   {(t1 - t0)*1000:.1f} ms")
-    print(f"Vector search: {(t3 - t2)*1000:.1f} ms")
-    print(f"Total:         {(t3 - t0)*1000:.1f} ms")
+    actions = []
+    for domain in domains:
+        svcs = await ha.domain_services(domain)
+        for svc, schema in (svcs or {}).items():
+            actions.append({
+                "action": f"{domain}.{svc}",
+                "domain": domain,
+                "service": svc,
+                "fields": list((schema.get("fields") or {}).keys()),
+                "description": schema.get("description") or ""
+            })
+
+    t4 = time.perf_counter()
+    print(json.dumps(devices, indent=2, ensure_ascii=False))
+    print(json.dumps(actions, indent=2, ensure_ascii=False))
+
 
 if __name__ == "__main__":
     asyncio.run(main())

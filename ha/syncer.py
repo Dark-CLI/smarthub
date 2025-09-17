@@ -1,60 +1,61 @@
-# smarthub/ha/syncer.py
-from __future__ import annotations
-from typing import Dict, Any, List, Tuple
+# ha/syncer.py
+import json
+from typing import Dict, Any, List
 
-from ha.client import HAClient
 from data.embedding import embed_texts
-from data.vectors import add_or_update_batch_with_meta, get_last_hash
-from data.builders import build_static_descriptor
+from data.vectors_devices import add_or_update as add_devices
+from data.vectors_actions import add_or_update as add_actions
+from ha.client import HAClient
 
-
-async def sync_embeddings(embed_model: str = "nomic-embed-text",
-                          batch: int = 32) -> Dict[str, int]:
+def _compact_device_json(state: Dict[str, Any]) -> str:
     """
-    Incremental sync (no repo):
-      - fetch /api/states and /api/services via HAClient
-      - build compact descriptors (drop empties, decode features)
-      - hash stable content; embed ONLY when changed
-      - upsert vectors + metadata to LanceDB
+    Minimal but useful JSON for embedding. NO dynamic state values.
+    Keep entity_id to tie back later.
     """
-    ha = HAClient()
-    states = await ha.states()
-    services_map = await ha.services_map()  # domain -> services dict
-
-    to_embed: List[Tuple[str, str, Dict[str, Any]]] = []  # (entity_id, descriptor_text, meta)
-
-    for st in states:
-        eid = st.get("entity_id")
-        if not eid or "." not in eid:
-            continue
-        dom = eid.split(".", 1)[0]
-        desc_text, content, content_hash = build_static_descriptor(st, services_map.get(dom, {}))
-        if not desc_text:
-            continue
-
-        prev_hash = get_last_hash(("entity", eid))
-        if prev_hash != content_hash:
-            meta = {
-                "domain": content.get("domain"),
-                "area": content.get("area"),
-                "content_hash": content_hash,
-                "last_embedded_hash": content_hash,
-            }
-            to_embed.append((eid, desc_text, meta))
-
-    embedded = 0
-    # simple batching; embedding itself is sequential per text for now
-    for i in range(0, len(to_embed), batch):
-        chunk = to_embed[i : i + batch]
-        texts = [t for (_, t, __) in chunk]
-        vecs = await embed_texts(texts, model=embed_model)
-        pairs = []
-        for j, (eid, _text, meta) in enumerate(chunk):
-            pairs.append((("entity", eid), vecs[j], meta))
-        add_or_update_batch_with_meta(pairs)
-        embedded += len(pairs)
-
-    return {
-        "entities_scanned": len(states),
-        "entities_embedded": embedded,
+    entity_id = state["entity_id"]
+    domain = entity_id.split(".", 1)[0] if "." in entity_id else None
+    name = (state.get("attributes") or {}).get("friendly_name")
+    obj = {
+        "entity_id": entity_id,
+        "name": name,
+        "domain": domain,
+        # area: wire later if you fetch area registry
     }
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+def _compact_action_json(domain: str, service: str, schema: Dict[str, Any]) -> str:
+    """
+    Minimal JSON for action semantics. Include fields (arg names) only.
+    """
+    fields = list((schema or {}).get("fields", {}).keys())
+    obj = {"action": f"{domain}.{service}", "domain": domain, "service": service, "fields": fields}
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+async def sync_all(embed_model: str = "nomic-embed-text") -> Dict[str, int]:
+    ha = HAClient()
+
+    # DEVICES
+    states: List[Dict[str, Any]] = await ha.states()
+    device_texts: List[str] = [_compact_device_json(st) for st in states]
+    device_vecs = await embed_texts(device_texts, model=embed_model)
+    dev_rows = []
+    for st, snap, vec in zip(states, device_texts, device_vecs):
+        key = f"entity:{st['entity_id']}"
+        dev_rows.append({"key": key, "vector": vec, "snapshot": snap})
+    add_devices(dev_rows)
+
+    # ACTIONS
+    svc_map: Dict[str, Dict[str, Any]] = await ha.services_map()  # {"light":{"turn_on":{schema},...},...}
+    action_pairs: List[tuple[str, str, Dict[str, Any]]] = []
+    for domain, svcs in (svc_map or {}).items():
+        for service, schema in svcs.items():
+            action_pairs.append((domain, service, schema))
+    action_texts = [_compact_action_json(d, s, schema) for (d, s, schema) in action_pairs]
+    action_vecs = await embed_texts(action_texts, model=embed_model)
+    act_rows = []
+    for (domain, service, _schema), snap, vec in zip(action_pairs, action_texts, action_vecs):
+        key = f"service:{domain}.{service}"
+        act_rows.append({"key": key, "vector": vec, "snapshot": snap})
+    add_actions(act_rows)
+
+    return {"devices_indexed": len(dev_rows), "actions_indexed": len(act_rows)}

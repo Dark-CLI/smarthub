@@ -63,6 +63,17 @@ class HAClient:
     async def state(self, entity_id: str) -> Dict[str, Any]:
         return await self._get(f"/api/states/{entity_id}")
 
+    async def states_batch(self, entity_ids: list[str]) -> list[dict]:
+        # Current implementation: dumb loop; optimized later
+        out = []
+        for eid in entity_ids:
+            try:
+                state = await self.state(eid)
+                if state: out.append(state)
+            except Exception:
+                pass
+        return out
+
     async def services(self) -> List[Dict[str, Any]]:
         if self._services_cache is None:
             self._services_cache = await self._get("/api/services")
